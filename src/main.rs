@@ -44,16 +44,20 @@ pub enum MqttVerifyError {
     },
 }
 
+fn client(uri: &str) -> mqtt::AsyncClient {
+    let mqtt_opts = mqtt::CreateOptionsBuilder::new()
+        .server_uri(uri.clone())
+        .persistence(mqtt::create_options::PersistenceType::None)
+        .finalize();
+    mqtt::AsyncClient::new(mqtt_opts).unwrap()
+}
+
 fn session(
     opt: &Opt,
     mut generator: source::VerifiableMessageGenerator,
 ) -> Box<dyn Future<Item = (), Error = MqttVerifyError>> {
     let frequency = opt.frequency;
-    let mqtt_opts = mqtt::CreateOptionsBuilder::new()
-        .server_uri(opt.publish_uri.clone())
-        .persistence(mqtt::create_options::PersistenceType::None)
-        .finalize();
-    let cli = mqtt::AsyncClient::new(mqtt_opts).unwrap();
+    let cli = client(&opt.publish_uri);
     let cli1 = cli.clone();
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
