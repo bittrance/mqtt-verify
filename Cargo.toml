@@ -1,0 +1,16 @@
+[package]
+name = "mqtt-verify"
+version = "0.1.0"
+authors = ["Anders Qvist <quest@lysator.liu.se>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+futures = "~0.1"
+futures-timer = "~0.1"
+log = "*"
+paho-mqtt = "~0.7"
+snafu = "*"
+stderrlog = "*"
+structopt = "*"
