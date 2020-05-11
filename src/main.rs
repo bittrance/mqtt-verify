@@ -6,6 +6,7 @@ use std::time::Duration;
 use structopt::StructOpt;
 
 mod source;
+mod verifier;
 
 use crate::source::MessageGenerator;
 
@@ -24,6 +25,9 @@ pub struct Opt {
     /// Session length in seconds
     #[structopt(long = "length", env = "LENGTH", default_value = "10.0")]
     length: f32,
+    /// URI to verify messages from
+    #[structopt(long = "subscribe-uri", env = "PUBLISH_URI")]
+    subscribe_uri: String,
 }
 
 #[derive(Debug, Snafu)]
@@ -42,6 +46,12 @@ pub enum MqttVerifyError {
     MqttPublishError {
         source: paho_mqtt::errors::MqttError,
     },
+    #[snafu(display("Subscribe borked: {}", source))]
+    MqttSubscribeError {
+        source: paho_mqtt::errors::MqttError,
+    },
+    #[snafu(display("Verification failed: {}", reason))]
+    VerificationFailure { reason: String },
 }
 
 fn client(uri: &str) -> mqtt::AsyncClient {
@@ -84,14 +94,62 @@ fn session(
     Box::new(session)
 }
 
+fn verify(
+    opt: &Opt,
+    mut verifier: Box<dyn verifier::Verifier>,
+) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = MqttVerifyError>> {
+    let mut cli = client(&opt.subscribe_uri);
+    let cli1 = cli.clone();
+    let cli2 = cli.clone();
+    let result = cli
+        .get_stream(100)
+        .map_err(|_| MqttVerifyError::VerificationFailure {
+            reason: "stream broke".to_owned(),
+        })
+        .take_while(|message| future::ok(message.is_some()))
+        .map(move |message| verifier.verify(message.unwrap()))
+        .and_then(|verification| match verification {
+            Ok(state) => future::ok(state),
+            Err(err) => future::err(err),
+        })
+        .take_while(|verification| match verification {
+            verifier::State::Healthy => future::ok(true),
+            verifier::State::Done => future::ok(false),
+        })
+        .for_each(|_| future::ok(()))
+        .and_then(move |_| {
+            cli.clone()
+                .disconnect_after(Duration::from_secs(3))
+                .map_err(|err| MqttVerifyError::MqttDisconnectError { source: err })
+        });
+    let conn_opts = mqtt::ConnectOptionsBuilder::new()
+        .clean_session(true)
+        .finalize();
+    let session = cli1
+        .connect(conn_opts)
+        .map_err(|err| MqttVerifyError::MqttConnectError { source: err })
+        .and_then(move |_| {
+            cli2.subscribe("testo", 0)
+                .map_err(|err| MqttVerifyError::MqttSubscribeError { source: err })
+        });
+    Box::new(session.and_then(|_| result))
+}
+
 fn main() {
     let opt = Opt::from_args();
+
     future::join_all((1..=opt.sessions).map(|i| {
+        let verifier = Box::new(verifier::SessionIdFilter::new(
+            format!("{}", i),
+            Box::new(verifier::CountingVerifier::new(
+                (opt.frequency * opt.length) as usize,
+            )),
+        ));
         let generator = source::VerifiableMessageGenerator::new(
             format!("{}", i),
             (opt.frequency * opt.length) as usize,
         );
-        session(&opt, generator)
+        verify(&opt, verifier).join(session(&opt, generator))
     }))
     .wait()
     .map(|_| ())
