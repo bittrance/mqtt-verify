@@ -1,3 +1,4 @@
+use crate::errors;
 use paho_mqtt as mqtt;
 
 #[derive(Debug, PartialEq)]
@@ -7,7 +8,7 @@ pub enum State {
 }
 
 pub trait Verifier {
-    fn verify(&mut self, message: mqtt::Message) -> Result<State, crate::MqttVerifyError>;
+    fn verify(&mut self, message: mqtt::Message) -> Result<State, errors::MqttVerifyError>;
 }
 
 pub struct SessionIdFilter {
@@ -23,7 +24,7 @@ impl SessionIdFilter {
 }
 
 impl Verifier for SessionIdFilter {
-    fn verify(&mut self, message: mqtt::Message) -> Result<State, crate::MqttVerifyError> {
+    fn verify(&mut self, message: mqtt::Message) -> Result<State, errors::MqttVerifyError> {
         if message.payload_str().starts_with(&self.id) {
             self.child.verify(message)
         } else {
@@ -47,10 +48,10 @@ impl CountingVerifier {
 }
 
 impl Verifier for CountingVerifier {
-    fn verify(&mut self, _message: mqtt::Message) -> Result<State, crate::MqttVerifyError> {
+    fn verify(&mut self, _message: mqtt::Message) -> Result<State, errors::MqttVerifyError> {
         self.count += 1;
         if self.count > self.expected_total {
-            Err(crate::MqttVerifyError::VerificationFailure {
+            Err(errors::MqttVerifyError::VerificationFailure {
                 reason: format!("Expected only {} messages", self.expected_total),
             })
         } else if self.count == self.expected_total {
@@ -64,11 +65,12 @@ impl Verifier for CountingVerifier {
 #[cfg(test)]
 mod tests {
     use super::{State, Verifier};
+    use crate::errors;
     use paho_mqtt as mqtt;
 
     struct DoneVerifier;
     impl super::Verifier for DoneVerifier {
-        fn verify(&mut self, _message: mqtt::Message) -> Result<State, crate::MqttVerifyError> {
+        fn verify(&mut self, _message: mqtt::Message) -> Result<State, errors::MqttVerifyError> {
             Ok(State::Done)
         }
     }
@@ -99,7 +101,7 @@ mod tests {
         assert_eq!(State::Healthy, verifier.verify(message.clone()).unwrap());
         assert_eq!(State::Done, verifier.verify(message.clone()).unwrap());
         match verifier.verify(mqtt::Message::new("ze-topic", "1", 0)) {
-            Err(crate::MqttVerifyError::VerificationFailure { reason: _ }) => (),
+            Err(errors::MqttVerifyError::VerificationFailure { reason: _ }) => (),
             _ => panic!("Expected a verification failure"),
         };
     }

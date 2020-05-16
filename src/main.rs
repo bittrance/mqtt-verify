@@ -1,10 +1,10 @@
 use evalexpr::{Context, HashMapContext, Value};
 use futures::{future, stream, stream::Stream, Future};
 use paho_mqtt as mqtt;
-use snafu::Snafu;
 use std::time::Duration;
 use structopt::StructOpt;
 
+mod errors;
 mod eval;
 mod source;
 mod verifier;
@@ -34,37 +34,6 @@ pub struct Opt {
     subscribe_uri: String,
 }
 
-#[derive(Debug, Snafu)]
-pub enum MqttVerifyError {
-    #[snafu(display("Timer borked: {}", source))]
-    SourceTimerError { source: std::io::Error },
-    #[snafu(display("Connect borked: {}", source))]
-    MqttConnectError {
-        source: paho_mqtt::errors::MqttError,
-    },
-    #[snafu(display("Disconnect borked: {}", source))]
-    MqttDisconnectError {
-        source: paho_mqtt::errors::MqttError,
-    },
-    #[snafu(display("Publish borked: {}", source))]
-    MqttPublishError {
-        source: paho_mqtt::errors::MqttError,
-    },
-    #[snafu(display("Subscribe borked: {}", source))]
-    MqttSubscribeError {
-        source: paho_mqtt::errors::MqttError,
-    },
-    #[snafu(display("Malformed value {}", value))]
-    MalformedValue { value: String },
-    #[snafu(display("Malformed expression in value {}: {}", value, source))]
-    MalformedExpression {
-        value: String,
-        source: evalexpr::EvalexprError,
-    },
-    #[snafu(display("Verification failed: {}", reason))]
-    VerificationFailure { reason: String },
-}
-
 fn client(uri: &str) -> mqtt::AsyncClient {
     let mqtt_opts = mqtt::CreateOptionsBuilder::new()
         .server_uri(uri.clone())
@@ -73,7 +42,8 @@ fn client(uri: &str) -> mqtt::AsyncClient {
     mqtt::AsyncClient::new(mqtt_opts).unwrap()
 }
 
-pub type MessageStream = Box<dyn stream::Stream<Item = mqtt::Message, Error = MqttVerifyError>>;
+pub type MessageStream =
+    Box<dyn stream::Stream<Item = mqtt::Message, Error = errors::MqttVerifyError>>;
 
 pub struct Scenario {
     publishers: Vec<Publisher>,
@@ -84,7 +54,7 @@ pub struct Publisher {
     sources: Vec<source::VerifiableSource>,
 }
 
-fn make_cli_scenario(opt: &Opt) -> Result<Scenario, MqttVerifyError> {
+fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError> {
     let mut sources = Vec::new();
     for i in 1..=opt.publishers {
         let mut context = HashMapContext::new();
@@ -120,7 +90,9 @@ fn publisher_messages(mut publisher: Publisher) -> MessageStream {
         })
 }
 
-fn run_scenario(mut scenario: Scenario) -> Box<dyn Future<Item = (), Error = MqttVerifyError>> {
+fn run_scenario(
+    mut scenario: Scenario,
+) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
     let mut publishers = Vec::new();
     for publisher in scenario.publishers.drain(..) {
         let conn_opts = mqtt::ConnectOptionsBuilder::new()
@@ -131,18 +103,18 @@ fn run_scenario(mut scenario: Scenario) -> Box<dyn Future<Item = (), Error = Mqt
         let client3 = publisher.client.clone();
         let s = client1
             .connect(conn_opts)
-            .map_err(|err| MqttVerifyError::MqttConnectError { source: err })
+            .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
             .and_then(move |_| {
                 publisher_messages(publisher).for_each(move |message| {
                     client2
                         .publish(message)
-                        .map_err(|err| MqttVerifyError::MqttPublishError { source: err })
+                        .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
                 })
             })
             .and_then(move |_| {
                 client3
                     .disconnect_after(Duration::from_secs(3))
-                    .map_err(|err| MqttVerifyError::MqttDisconnectError { source: err })
+                    .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
             });
         publishers.push(s);
     }
@@ -152,14 +124,15 @@ fn run_scenario(mut scenario: Scenario) -> Box<dyn Future<Item = (), Error = Mqt
 fn verify(
     opt: &Opt,
     mut verifier: Box<dyn verifier::Verifier>,
-) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = MqttVerifyError>> {
+) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = errors::MqttVerifyError>>
+{
     let mut cli = client(&opt.subscribe_uri);
     let topic = opt.topic.clone();
     let cli1 = cli.clone();
     let cli2 = cli.clone();
     let result = cli
         .get_stream(100)
-        .map_err(|_| MqttVerifyError::VerificationFailure {
+        .map_err(|_| errors::MqttVerifyError::VerificationFailure {
             reason: "stream broke".to_owned(),
         })
         .take_while(|message| future::ok(message.is_some()))
@@ -176,22 +149,22 @@ fn verify(
         .and_then(move |_| {
             cli.clone()
                 .disconnect_after(Duration::from_secs(3))
-                .map_err(|err| MqttVerifyError::MqttDisconnectError { source: err })
+                .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
         });
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .finalize();
     let session = cli1
         .connect(conn_opts)
-        .map_err(|err| MqttVerifyError::MqttConnectError { source: err })
+        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
         .and_then(move |_| {
             cli2.subscribe(topic, 0)
-                .map_err(|err| MqttVerifyError::MqttSubscribeError { source: err })
+                .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
         });
     Box::new(session.and_then(|_| result))
 }
 
-fn main() -> Result<(), MqttVerifyError> {
+fn main() -> Result<(), errors::MqttVerifyError> {
     let opt = Opt::from_args();
     let scenario = make_cli_scenario(&opt)?;
 

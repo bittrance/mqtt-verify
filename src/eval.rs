@@ -1,3 +1,4 @@
+use crate::errors;
 use evalexpr::{build_operator_tree, HashMapContext, Node};
 
 pub struct ContextualValue {
@@ -21,7 +22,7 @@ fn maybe_push_str(parts: &mut Vec<String>, part: &str) {
     }
 }
 
-pub fn precompile(value: &str) -> Result<Node, crate::MqttVerifyError> {
+pub fn precompile(value: &str) -> Result<Node, errors::MqttVerifyError> {
     let mut stop = 0;
     let mut parts: Vec<String> = Vec::new();
     for (start, _) in value.match_indices("{{") {
@@ -29,7 +30,7 @@ pub fn precompile(value: &str) -> Result<Node, crate::MqttVerifyError> {
         stop = start
             + value[start..]
                 .find("}}")
-                .ok_or_else(|| crate::MqttVerifyError::MalformedValue {
+                .ok_or_else(|| errors::MqttVerifyError::MalformedValue {
                     value: value.to_owned(),
                 })?;
         parts.push(value[start + 2..stop].to_owned());
@@ -37,7 +38,7 @@ pub fn precompile(value: &str) -> Result<Node, crate::MqttVerifyError> {
     }
     maybe_push_str(&mut parts, &value[stop..]);
     build_operator_tree(&parts.join("+")).map_err(|err| {
-        crate::MqttVerifyError::MalformedExpression {
+        errors::MqttVerifyError::MalformedExpression {
             value: value.to_owned(),
             source: err,
         }

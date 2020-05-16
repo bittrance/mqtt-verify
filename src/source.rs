@@ -1,3 +1,4 @@
+use crate::errors;
 use crate::eval::ContextualValue;
 use futures::{future, stream::Stream};
 use futures_timer::Interval;
@@ -45,7 +46,7 @@ impl Source for VerifiableSource {
             Interval::new(Duration::from_micros(
                 (1_000_000f32 / self.frequency) as u64,
             ))
-            .map_err(|err| crate::MqttVerifyError::SourceTimerError { source: err })
+            .map_err(|err| errors::MqttVerifyError::SourceTimerError { source: err })
             .map(move |_| self.next_message())
             .take_while(|message| future::ok(message.is_some()))
             .map(|message| message.unwrap()),
