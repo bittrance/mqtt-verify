@@ -36,7 +36,7 @@ pub struct Opt {
 
 fn client(uri: &str) -> mqtt::AsyncClient {
     let mqtt_opts = mqtt::CreateOptionsBuilder::new()
-        .server_uri(uri.clone())
+        .server_uri(uri)
         .persistence(mqtt::create_options::PersistenceType::None)
         .finalize();
     mqtt::AsyncClient::new(mqtt_opts).unwrap()
@@ -147,8 +147,7 @@ fn verify(
         })
         .for_each(|_| future::ok(()))
         .and_then(move |_| {
-            cli.clone()
-                .disconnect_after(Duration::from_secs(3))
+            cli.disconnect_after(Duration::from_secs(3))
                 .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
         });
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
