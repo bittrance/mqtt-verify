@@ -7,10 +7,12 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+evalexpr = "~5.0"
 futures = "~0.1"
 futures-timer = "~0.1"
 log = "*"
 paho-mqtt = "~0.7"
 snafu = "*"
 stderrlog = "*"
-structopt = "*"
+structopt = { version = "0.3", default-features = false }
+

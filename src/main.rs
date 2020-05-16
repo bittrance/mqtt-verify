@@ -1,9 +1,11 @@
+use evalexpr::{Context, HashMapContext, Value};
 use futures::{future, stream, stream::Stream, Future};
 use paho_mqtt as mqtt;
 use snafu::Snafu;
 use std::time::Duration;
 use structopt::StructOpt;
 
+mod eval;
 mod source;
 mod verifier;
 
@@ -24,6 +26,9 @@ pub struct Opt {
     /// Session length in seconds
     #[structopt(long = "length", env = "LENGTH", default_value = "10.0")]
     length: f32,
+    /// Topic to publish to
+    #[structopt(long = "topic", env = "TOPIC", default_value = "1")]
+    topic: String,
     /// URI to verify messages from
     #[structopt(long = "subscribe-uri", env = "PUBLISH_URI")]
     subscribe_uri: String,
@@ -49,6 +54,13 @@ pub enum MqttVerifyError {
     MqttSubscribeError {
         source: paho_mqtt::errors::MqttError,
     },
+    #[snafu(display("Malformed value {}", value))]
+    MalformedValue { value: String },
+    #[snafu(display("Malformed expression in value {}: {}", value, source))]
+    MalformedExpression {
+        value: String,
+        source: evalexpr::EvalexprError,
+    },
     #[snafu(display("Verification failed: {}", reason))]
     VerificationFailure { reason: String },
 }
@@ -72,20 +84,27 @@ pub struct Publisher {
     sources: Vec<source::VerifiableSource>,
 }
 
-fn make_cli_scenario(opt: &Opt) -> Scenario {
-    let sources = (1..=opt.publishers).map(|i| {
-        source::VerifiableSource::new(
+fn make_cli_scenario(opt: &Opt) -> Result<Scenario, MqttVerifyError> {
+    let mut sources = Vec::new();
+    for i in 1..=opt.publishers {
+        let mut context = HashMapContext::new();
+        context
+            .set_value("publisher".to_owned(), Value::String(format!("p-{}", i)))
+            .unwrap();
+        let topic = eval::ContextualValue::new(eval::precompile(&opt.topic)?, context);
+        sources.push(source::VerifiableSource::new(
             format!("{}", i),
+            topic,
             (opt.frequency * opt.length) as usize,
             opt.frequency,
-        )
-    });
-    Scenario {
+        ));
+    }
+    Ok(Scenario {
         publishers: vec![Publisher {
             client: client(&opt.publish_uri),
-            sources: sources.collect(),
+            sources: sources,
         }],
-    }
+    })
 }
 
 fn publisher_messages(mut publisher: Publisher) -> MessageStream {
@@ -135,6 +154,7 @@ fn verify(
     mut verifier: Box<dyn verifier::Verifier>,
 ) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = MqttVerifyError>> {
     let mut cli = client(&opt.subscribe_uri);
+    let topic = opt.topic.clone();
     let cli1 = cli.clone();
     let cli2 = cli.clone();
     let result = cli
@@ -165,15 +185,15 @@ fn verify(
         .connect(conn_opts)
         .map_err(|err| MqttVerifyError::MqttConnectError { source: err })
         .and_then(move |_| {
-            cli2.subscribe("testo", 0)
+            cli2.subscribe(topic, 0)
                 .map_err(|err| MqttVerifyError::MqttSubscribeError { source: err })
         });
     Box::new(session.and_then(|_| result))
 }
 
-fn main() {
+fn main() -> Result<(), MqttVerifyError> {
     let opt = Opt::from_args();
-    let scenario = make_cli_scenario(&opt);
+    let scenario = make_cli_scenario(&opt)?;
 
     future::join_all((1..=opt.publishers).map(|i| {
         let verifier = Box::new(verifier::SessionIdFilter::new(
@@ -190,4 +210,5 @@ fn main() {
     .unwrap_or_else(|err| {
         println!("Error: {}", err);
     });
+    Ok(())
 }
