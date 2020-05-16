@@ -4,10 +4,10 @@ use paho_mqtt as mqtt;
 use std::time::Duration;
 use structopt::StructOpt;
 
+mod analyzers;
 mod errors;
 mod eval;
 mod source;
-mod verifier;
 
 use crate::source::Source;
 
@@ -123,7 +123,7 @@ fn run_scenario(
 
 fn verify(
     opt: &Opt,
-    mut verifier: Box<dyn verifier::Verifier>,
+    mut analyzer: Box<dyn analyzers::Analyzer>,
 ) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = errors::MqttVerifyError>>
 {
     let mut cli = client(&opt.subscribe_uri);
@@ -136,14 +136,14 @@ fn verify(
             reason: "stream broke".to_owned(),
         })
         .take_while(|message| future::ok(message.is_some()))
-        .map(move |message| verifier.verify(message.unwrap()))
-        .and_then(|verification| match verification {
+        .map(move |message| analyzer.analyze(message.unwrap()))
+        .and_then(|analysis| match analysis {
             Ok(state) => future::ok(state),
             Err(err) => future::err(err),
         })
-        .take_while(|verification| match verification {
-            verifier::State::Healthy => future::ok(true),
-            verifier::State::Done => future::ok(false),
+        .take_while(|analysis| match analysis {
+            analyzers::State::Continue => future::ok(true),
+            analyzers::State::Done => future::ok(false),
         })
         .for_each(|_| future::ok(()))
         .and_then(move |_| {
@@ -169,13 +169,13 @@ fn main() -> Result<(), errors::MqttVerifyError> {
     let scenario = make_cli_scenario(&opt)?;
 
     future::join_all((1..=opt.publishers).map(|i| {
-        let verifier = Box::new(verifier::SessionIdFilter::new(
+        let analyzer = Box::new(analyzers::SessionIdFilter::new(
             format!("{}", i),
-            Box::new(verifier::CountingVerifier::new(
+            Box::new(analyzers::CountingAnalyzer::new(
                 (opt.frequency * opt.length) as usize,
             )),
         ));
-        verify(&opt, verifier)
+        verify(&opt, analyzer)
     }))
     .join(run_scenario(scenario))
     .wait()
