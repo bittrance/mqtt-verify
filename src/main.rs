@@ -1,16 +1,14 @@
-use evalexpr::Value;
 use futures::{future, stream, stream::Stream, Future};
 use paho_mqtt as mqtt;
-use std::rc::Rc;
 use std::time::Duration;
 use structopt::StructOpt;
 
 mod analyzers;
 mod context;
 mod errors;
+mod scenario;
 mod source;
 
-use crate::context::OverlayContext;
 use crate::source::Source;
 
 fn split_on_equal(input: &str) -> Result<(String, String), errors::MqttVerifyError> {
@@ -50,7 +48,7 @@ pub struct Opt {
     parameters: Vec<(String, String)>,
 }
 
-fn client(uri: &str) -> mqtt::AsyncClient {
+pub fn client(uri: &str) -> mqtt::AsyncClient {
     let mqtt_opts = mqtt::CreateOptionsBuilder::new()
         .server_uri(uri)
         .persistence(mqtt::create_options::PersistenceType::None)
@@ -61,44 +59,7 @@ fn client(uri: &str) -> mqtt::AsyncClient {
 pub type MessageStream =
     Box<dyn stream::Stream<Item = mqtt::Message, Error = errors::MqttVerifyError>>;
 
-pub struct Scenario {
-    publishers: Vec<Publisher>,
-}
-
-pub struct Publisher {
-    client: mqtt::AsyncClient,
-    sources: Vec<source::VerifiableSource>,
-}
-
-fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError> {
-    let mut root = OverlayContext::root();
-    for (k, v) in &opt.parameters {
-        Rc::get_mut(&mut root)
-            .unwrap()
-            .insert(k.clone(), Value::String(v.clone()));
-    }
-    let mut sources = Vec::new();
-    for i in 1..=opt.publishers {
-        let mut context = OverlayContext::subcontext(root.clone());
-        Rc::get_mut(&mut context)
-            .unwrap()
-            .insert("publisher".to_owned(), Value::String(format!("p-{}", i)));
-        sources.push(source::VerifiableSource::new(
-            format!("{}", i),
-            OverlayContext::value_for(context.clone(), &opt.topic)?,
-            (opt.frequency * opt.length) as usize,
-            opt.frequency,
-        ));
-    }
-    Ok(Scenario {
-        publishers: vec![Publisher {
-            client: client(&opt.publish_uri),
-            sources: sources,
-        }],
-    })
-}
-
-fn publisher_messages(mut publisher: Publisher) -> MessageStream {
+fn publisher_messages(mut publisher: scenario::Publisher) -> MessageStream {
     // FIXME: Merging a large number of streams like this is probably quite inefficient since it
     // creates a chain of Select objects, but until paho_mqtt supports futures 0.3 with proper
     // multi-select, we'll have to live with it.
@@ -112,7 +73,7 @@ fn publisher_messages(mut publisher: Publisher) -> MessageStream {
 }
 
 fn run_scenario(
-    mut scenario: Scenario,
+    mut scenario: scenario::Scenario,
 ) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
     let mut publishers = Vec::new();
     for publisher in scenario.publishers.drain(..) {
@@ -186,7 +147,7 @@ fn verify(
 
 fn main() -> Result<(), errors::MqttVerifyError> {
     let opt = Opt::from_args();
-    let scenario = make_cli_scenario(&opt)?;
+    let scenario = scenario::make_cli_scenario(&opt)?;
 
     future::join_all((1..=opt.publishers).map(|i| {
         let analyzer = Box::new(analyzers::SessionIdFilter::new(
@@ -204,45 +165,4 @@ fn main() -> Result<(), errors::MqttVerifyError> {
         println!("Error: {}", err);
     });
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Opt;
-    use crate::errors;
-    use structopt::StructOpt;
-
-    fn basic_options(extra: Vec<&str>) -> Opt {
-        let mut args = vec![
-            "./mqtt-verify",
-            "--publish-uri",
-            "tcp://localhost:1883",
-            "--subscribe-uri",
-            "tcp://localhost:1883",
-        ];
-        args.extend(extra);
-        Opt::from_iter(args)
-    }
-
-    #[test]
-    fn make_cli_scenario_creates_soruces_with_expansion() -> Result<(), errors::MqttVerifyError> {
-        let opt = basic_options(vec!["--topic", "{{publisher}}"]);
-        let scenario = super::make_cli_scenario(&opt)?;
-        assert_eq!(1, scenario.publishers.len());
-        let publisher = scenario.publishers.get(0).unwrap();
-        assert_eq!(1, publisher.sources.len());
-        let source = publisher.sources.get(0).unwrap();
-        assert_eq!("p-1".to_owned(), source.topic.value());
-        Ok(())
-    }
-
-    #[test]
-    fn make_cli_scenario_expands_from_parameter() -> Result<(), errors::MqttVerifyError> {
-        let opt = basic_options(vec!["--topic", "{{foo}}", "--parameter", "foo=bar"]);
-        let scenario = super::make_cli_scenario(&opt)?;
-        let publisher = scenario.publishers.get(0).unwrap();
-        let source = publisher.sources.get(0).unwrap();
-        assert_eq!("bar".to_owned(), source.topic.value());
-        Ok(())
-    }
 }
