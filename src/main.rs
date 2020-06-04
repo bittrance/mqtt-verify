@@ -1,15 +1,28 @@
-use evalexpr::{Context, HashMapContext, Value};
+use evalexpr::Value;
 use futures::{future, stream, stream::Stream, Future};
 use paho_mqtt as mqtt;
+use std::rc::Rc;
 use std::time::Duration;
 use structopt::StructOpt;
 
 mod analyzers;
+mod context;
 mod errors;
-mod eval;
 mod source;
 
+use crate::context::OverlayContext;
 use crate::source::Source;
+
+fn split_on_equal(input: &str) -> Result<(String, String), errors::MqttVerifyError> {
+    let pair: Vec<&str> = input.splitn(2, '=').collect();
+    if pair.len() == 2 {
+        Ok((pair[0].to_owned(), pair[1].to_owned()))
+    } else {
+        Err(errors::MqttVerifyError::MalformedParameter {
+            input: input.to_owned(),
+        })
+    }
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt()]
@@ -32,6 +45,9 @@ pub struct Opt {
     /// URI to verify messages from
     #[structopt(long = "subscribe-uri", env = "PUBLISH_URI")]
     subscribe_uri: String,
+    /// Parameter for expansion
+    #[structopt(long = "parameter", parse(try_from_str = split_on_equal))]
+    parameters: Vec<(String, String)>,
 }
 
 fn client(uri: &str) -> mqtt::AsyncClient {
@@ -55,16 +71,21 @@ pub struct Publisher {
 }
 
 fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError> {
+    let mut root = OverlayContext::root();
+    for (k, v) in &opt.parameters {
+        Rc::get_mut(&mut root)
+            .unwrap()
+            .insert(k.clone(), Value::String(v.clone()));
+    }
     let mut sources = Vec::new();
     for i in 1..=opt.publishers {
-        let mut context = HashMapContext::new();
-        context
-            .set_value("publisher".to_owned(), Value::String(format!("p-{}", i)))
-            .unwrap();
-        let topic = eval::ContextualValue::new(eval::precompile(&opt.topic)?, context);
+        let mut context = OverlayContext::subcontext(root.clone());
+        Rc::get_mut(&mut context)
+            .unwrap()
+            .insert("publisher".to_owned(), Value::String(format!("p-{}", i)));
         sources.push(source::VerifiableSource::new(
             format!("{}", i),
-            topic,
+            OverlayContext::value_for(context.clone(), &opt.topic)?,
             (opt.frequency * opt.length) as usize,
             opt.frequency,
         ));
@@ -183,4 +204,45 @@ fn main() -> Result<(), errors::MqttVerifyError> {
         println!("Error: {}", err);
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Opt;
+    use crate::errors;
+    use structopt::StructOpt;
+
+    fn basic_options(extra: Vec<&str>) -> Opt {
+        let mut args = vec![
+            "./mqtt-verify",
+            "--publish-uri",
+            "tcp://localhost:1883",
+            "--subscribe-uri",
+            "tcp://localhost:1883",
+        ];
+        args.extend(extra);
+        Opt::from_iter(args)
+    }
+
+    #[test]
+    fn make_cli_scenario_creates_soruces_with_expansion() -> Result<(), errors::MqttVerifyError> {
+        let opt = basic_options(vec!["--topic", "{{publisher}}"]);
+        let scenario = super::make_cli_scenario(&opt)?;
+        assert_eq!(1, scenario.publishers.len());
+        let publisher = scenario.publishers.get(0).unwrap();
+        assert_eq!(1, publisher.sources.len());
+        let source = publisher.sources.get(0).unwrap();
+        assert_eq!("p-1".to_owned(), source.topic.value());
+        Ok(())
+    }
+
+    #[test]
+    fn make_cli_scenario_expands_from_parameter() -> Result<(), errors::MqttVerifyError> {
+        let opt = basic_options(vec!["--topic", "{{foo}}", "--parameter", "foo=bar"]);
+        let scenario = super::make_cli_scenario(&opt)?;
+        let publisher = scenario.publishers.get(0).unwrap();
+        let source = publisher.sources.get(0).unwrap();
+        assert_eq!("bar".to_owned(), source.topic.value());
+        Ok(())
+    }
 }

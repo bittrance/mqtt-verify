@@ -1,5 +1,5 @@
+use crate::context::ContextualValue;
 use crate::errors;
-use crate::eval::ContextualValue;
 use futures::{future, stream::Stream};
 use futures_timer::Interval;
 use paho_mqtt as mqtt;
@@ -12,7 +12,7 @@ pub trait Source {
 
 pub struct VerifiableSource {
     id: String,
-    topic: ContextualValue,
+    pub(crate) topic: ContextualValue,
     seq_no: Cell<usize>,
     total_count: usize,
     frequency: f32,
@@ -56,14 +56,14 @@ impl Source for VerifiableSource {
 
 #[cfg(test)]
 mod tests {
-    use crate::eval::ContextualValue;
-    use evalexpr::{build_operator_tree, HashMapContext};
+    use crate::context::{ContextualValue, OverlayContext};
+    use evalexpr::build_operator_tree;
 
     #[test]
     fn verifiable_source_topic() {
         let topic = ContextualValue::new(
             build_operator_tree("\"ze-topic\"").unwrap(),
-            HashMapContext::new(),
+            OverlayContext::root(),
         );
         let source = super::VerifiableSource::new("id".to_owned(), topic, 1, 1.0);
         assert_eq!("ze-topic", source.next_message().unwrap().topic());
@@ -73,7 +73,7 @@ mod tests {
     fn verifiable_source_iteration() {
         let topic = ContextualValue::new(
             build_operator_tree("\"ze-topic\"").unwrap(),
-            HashMapContext::new(),
+            OverlayContext::root(),
         );
         let source = super::VerifiableSource::new("id".to_owned(), topic, 2, 1.0);
         assert_eq!("id:1/2", source.next_message().unwrap().payload_str());

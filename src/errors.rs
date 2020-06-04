@@ -2,6 +2,8 @@ use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
 pub enum MqttVerifyError {
+    #[snafu(display("Expected {} to be on format X=Y", input))]
+    MalformedParameter { input: String },
     #[snafu(display("Timer borked: {}", source))]
     SourceTimerError { source: std::io::Error },
     #[snafu(display("Connect borked: {}", source))]
