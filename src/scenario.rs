@@ -1,3 +1,4 @@
+use crate::analyzers;
 use crate::context::OverlayContext;
 use crate::errors;
 use crate::source;
@@ -8,11 +9,18 @@ use std::rc::Rc;
 
 pub struct Scenario {
     pub publishers: Vec<Publisher>,
+    pub subscribers: Vec<Subscriber>,
 }
 
 pub struct Publisher {
     pub client: mqtt::AsyncClient,
     pub sources: Vec<source::VerifiableSource>,
+}
+
+pub struct Subscriber {
+    pub client: mqtt::AsyncClient,
+    pub topics: Vec<String>,
+    pub sinks: Vec<Box<dyn analyzers::Analyzer>>,
 }
 
 pub fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError> {
@@ -23,6 +31,7 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError>
             .insert(k.clone(), Value::String(v.clone()));
     }
     let mut sources = Vec::new();
+    let mut sinks: Vec<Box<dyn analyzers::Analyzer>> = Vec::new();
     for i in 1..=opt.publishers {
         let mut context = OverlayContext::subcontext(root.clone());
         Rc::get_mut(&mut context)
@@ -34,11 +43,22 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<Scenario, errors::MqttVerifyError>
             (opt.frequency * opt.length) as usize,
             opt.frequency,
         ));
+        sinks.push(Box::new(analyzers::SessionIdFilter::new(
+            format!("{}", i),
+            Box::new(analyzers::CountingAnalyzer::new(
+                (opt.frequency * opt.length) as usize,
+            )),
+        )));
     }
     Ok(Scenario {
         publishers: vec![Publisher {
             client: crate::client(&opt.publish_uri),
             sources: sources,
+        }],
+        subscribers: vec![Subscriber {
+            client: crate::client(&opt.subscribe_uri),
+            topics: vec![opt.topic.clone()],
+            sinks: sinks,
         }],
     })
 }

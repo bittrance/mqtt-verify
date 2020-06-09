@@ -75,44 +75,52 @@ fn publisher_messages(mut publisher: scenario::Publisher) -> MessageStream {
 fn run_scenario(
     mut scenario: scenario::Scenario,
 ) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
-    let mut publishers = Vec::new();
+    let mut actors = Vec::new();
     for publisher in scenario.publishers.drain(..) {
-        let conn_opts = mqtt::ConnectOptionsBuilder::new()
-            .clean_session(true)
-            .finalize();
-        let client1 = publisher.client.clone();
-        let client2 = publisher.client.clone();
-        let client3 = publisher.client.clone();
-        let s = client1
-            .connect(conn_opts)
-            .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
-            .and_then(move |_| {
-                publisher_messages(publisher).for_each(move |message| {
-                    client2
-                        .publish(message)
-                        .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
-                })
-            })
-            .and_then(move |_| {
-                client3
-                    .disconnect_after(Duration::from_secs(3))
-                    .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
-            });
-        publishers.push(s);
+        actors.push(run_publisher(publisher));
     }
-    Box::new(future::join_all(publishers).map(|_| ()))
+    for subscriber in scenario.subscribers.drain(..) {
+        actors.push(run_subscriber(subscriber));
+    }
+    Box::new(future::join_all(actors).map(|_| ()))
 }
 
-fn verify(
-    opt: &Opt,
-    mut analyzer: Box<dyn analyzers::Analyzer>,
-) -> Box<dyn Future<Item = mqtt::server_response::ServerResponse, Error = errors::MqttVerifyError>>
-{
-    let mut cli = client(&opt.subscribe_uri);
-    let topic = opt.topic.clone();
-    let cli1 = cli.clone();
-    let cli2 = cli.clone();
-    let result = cli
+fn run_publisher(
+    publisher: scenario::Publisher,
+) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
+    let conn_opts = mqtt::ConnectOptionsBuilder::new()
+        .clean_session(true)
+        .finalize();
+    let client1 = publisher.client.clone();
+    let client2 = publisher.client.clone();
+    let client3 = publisher.client.clone();
+    let session = client1
+        .connect(conn_opts)
+        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
+        .and_then(move |_| {
+            publisher_messages(publisher).for_each(move |message| {
+                client2
+                    .publish(message)
+                    .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
+            })
+        })
+        .and_then(move |_| {
+            client3
+                .disconnect_after(Duration::from_secs(3))
+                .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
+        });
+    Box::new(session.map(|_| ()))
+}
+
+fn run_subscriber(
+    mut subscriber: scenario::Subscriber,
+) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
+    let mut analyzer = subscriber.sinks.remove(0);
+    let mut client1 = subscriber.client.clone();
+    let client2 = subscriber.client.clone();
+    let client3 = subscriber.client.clone();
+    let client4 = subscriber.client.clone();
+    let stream = client1
         .get_stream(100)
         .map_err(|_| errors::MqttVerifyError::VerificationFailure {
             reason: "stream broke".to_owned(),
@@ -129,40 +137,34 @@ fn verify(
         })
         .for_each(|_| future::ok(()))
         .and_then(move |_| {
-            cli.disconnect_after(Duration::from_secs(3))
+            client2
+                .disconnect_after(Duration::from_secs(3))
                 .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
         });
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .finalize();
-    let session = cli1
+    let session = client3
         .connect(conn_opts)
         .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
         .and_then(move |_| {
-            cli2.subscribe(topic, 0)
+            client4
+                .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
                 .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
-        });
-    Box::new(session.and_then(|_| result))
+        })
+        .and_then(|_| stream);
+    Box::new(session.map(|_| ()))
 }
 
 fn main() -> Result<(), errors::MqttVerifyError> {
     let opt = Opt::from_args();
     let scenario = scenario::make_cli_scenario(&opt)?;
 
-    future::join_all((1..=opt.publishers).map(|i| {
-        let analyzer = Box::new(analyzers::SessionIdFilter::new(
-            format!("{}", i),
-            Box::new(analyzers::CountingAnalyzer::new(
-                (opt.frequency * opt.length) as usize,
-            )),
-        ));
-        verify(&opt, analyzer)
-    }))
-    .join(run_scenario(scenario))
-    .wait()
-    .map(|_| ())
-    .unwrap_or_else(|err| {
-        println!("Error: {}", err);
-    });
+    run_scenario(scenario)
+        .wait()
+        .map(|_| ())
+        .unwrap_or_else(|err| {
+            println!("Error: {}", err);
+        });
     Ok(())
 }
