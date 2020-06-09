@@ -12,7 +12,7 @@ pub trait Source {
 
 pub struct VerifiableSource {
     id: String,
-    pub(crate) topic: ContextualValue,
+    pub topic: ContextualValue,
     seq_no: Cell<usize>,
     total_count: usize,
     frequency: f32,

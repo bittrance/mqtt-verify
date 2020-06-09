@@ -1,15 +1,8 @@
-use futures::{future, stream, stream::Stream, Future};
-use paho_mqtt as mqtt;
-use std::time::Duration;
+use evalexpr::Value;
+use futures::future::Future;
+use mqtt_verify::{analyzers, context, errors, scenario, source};
+use std::rc::Rc;
 use structopt::StructOpt;
-
-mod analyzers;
-mod context;
-mod errors;
-mod scenario;
-mod source;
-
-use crate::source::Source;
 
 fn split_on_equal(input: &str) -> Result<(String, String), errors::MqttVerifyError> {
     let pair: Vec<&str> = input.splitn(2, '=').collect();
@@ -48,123 +41,96 @@ pub struct Opt {
     parameters: Vec<(String, String)>,
 }
 
-pub fn client(uri: &str) -> mqtt::AsyncClient {
-    let mqtt_opts = mqtt::CreateOptionsBuilder::new()
-        .server_uri(uri)
-        .persistence(mqtt::create_options::PersistenceType::None)
-        .finalize();
-    mqtt::AsyncClient::new(mqtt_opts).unwrap()
-}
-
-pub type MessageStream =
-    Box<dyn stream::Stream<Item = mqtt::Message, Error = errors::MqttVerifyError>>;
-
-fn publisher_messages(mut publisher: scenario::Publisher) -> MessageStream {
-    // FIXME: Merging a large number of streams like this is probably quite inefficient since it
-    // creates a chain of Select objects, but until paho_mqtt supports futures 0.3 with proper
-    // multi-select, we'll have to live with it.
-    publisher
-        .sources
-        .drain(..)
-        .map(|generator| generator.messages())
-        .fold(Box::new(stream::empty()), |acc, stream| {
-            Box::new(stream.select(acc))
-        })
-}
-
-fn run_scenario(
-    mut scenario: scenario::Scenario,
-) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
-    let mut actors = Vec::new();
-    for publisher in scenario.publishers.drain(..) {
-        actors.push(run_publisher(publisher));
+pub fn make_cli_scenario(opt: &Opt) -> Result<scenario::Scenario, errors::MqttVerifyError> {
+    let mut root = context::OverlayContext::root();
+    for (k, v) in &opt.parameters {
+        Rc::get_mut(&mut root)
+            .unwrap()
+            .insert(k.clone(), Value::String(v.clone()));
     }
-    for subscriber in scenario.subscribers.drain(..) {
-        actors.push(run_subscriber(subscriber));
+    let mut sources = Vec::new();
+    let mut sinks: Vec<Box<dyn analyzers::Analyzer>> = Vec::new();
+    for i in 1..=opt.publishers {
+        let mut context = context::OverlayContext::subcontext(root.clone());
+        Rc::get_mut(&mut context)
+            .unwrap()
+            .insert("publisher".to_owned(), Value::String(format!("p-{}", i)));
+        sources.push(source::VerifiableSource::new(
+            format!("{}", i),
+            context::OverlayContext::value_for(context.clone(), &opt.topic)?,
+            (opt.frequency * opt.length) as usize,
+            opt.frequency,
+        ));
+        sinks.push(Box::new(analyzers::SessionIdFilter::new(
+            format!("{}", i),
+            Box::new(analyzers::CountingAnalyzer::new(
+                (opt.frequency * opt.length) as usize,
+            )),
+        )));
     }
-    Box::new(future::join_all(actors).map(|_| ()))
-}
-
-fn run_publisher(
-    publisher: scenario::Publisher,
-) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .clean_session(true)
-        .finalize();
-    let client1 = publisher.client.clone();
-    let client2 = publisher.client.clone();
-    let client3 = publisher.client.clone();
-    let session = client1
-        .connect(conn_opts)
-        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
-        .and_then(move |_| {
-            publisher_messages(publisher).for_each(move |message| {
-                client2
-                    .publish(message)
-                    .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
-            })
-        })
-        .and_then(move |_| {
-            client3
-                .disconnect_after(Duration::from_secs(3))
-                .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
-        });
-    Box::new(session.map(|_| ()))
-}
-
-fn run_subscriber(
-    mut subscriber: scenario::Subscriber,
-) -> Box<dyn Future<Item = (), Error = errors::MqttVerifyError>> {
-    let mut analyzer = subscriber.sinks.remove(0);
-    let mut client1 = subscriber.client.clone();
-    let client2 = subscriber.client.clone();
-    let client3 = subscriber.client.clone();
-    let client4 = subscriber.client.clone();
-    let stream = client1
-        .get_stream(100)
-        .map_err(|_| errors::MqttVerifyError::VerificationFailure {
-            reason: "stream broke".to_owned(),
-        })
-        .take_while(|message| future::ok(message.is_some()))
-        .map(move |message| analyzer.analyze(message.unwrap()))
-        .and_then(|analysis| match analysis {
-            Ok(state) => future::ok(state),
-            Err(err) => future::err(err),
-        })
-        .take_while(|analysis| match analysis {
-            analyzers::State::Continue => future::ok(true),
-            analyzers::State::Done => future::ok(false),
-        })
-        .for_each(|_| future::ok(()))
-        .and_then(move |_| {
-            client2
-                .disconnect_after(Duration::from_secs(3))
-                .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
-        });
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .clean_session(true)
-        .finalize();
-    let session = client3
-        .connect(conn_opts)
-        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })
-        .and_then(move |_| {
-            client4
-                .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
-                .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
-        })
-        .and_then(|_| stream);
-    Box::new(session.map(|_| ()))
+    Ok(scenario::Scenario {
+        publishers: vec![scenario::Publisher {
+            client: mqtt_verify::client(&opt.publish_uri),
+            sources: sources,
+        }],
+        subscribers: vec![scenario::Subscriber {
+            client: mqtt_verify::client(&opt.subscribe_uri),
+            topics: vec![opt.topic.clone()],
+            sinks: sinks,
+        }],
+    })
 }
 
 fn main() -> Result<(), errors::MqttVerifyError> {
     let opt = Opt::from_args();
-    let scenario = scenario::make_cli_scenario(&opt)?;
+    let scenario = make_cli_scenario(&opt)?;
 
-    run_scenario(scenario)
+    mqtt_verify::run_scenario(scenario)
         .wait()
         .map(|_| ())
         .unwrap_or_else(|err| {
             println!("Error: {}", err);
         });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Opt;
+    use mqtt_verify::errors;
+    use structopt::StructOpt;
+
+    fn basic_options(extra: Vec<&str>) -> Opt {
+        let mut args = vec![
+            "./mqtt-verify",
+            "--publish-uri",
+            "tcp://localhost:1883",
+            "--subscribe-uri",
+            "tcp://localhost:1883",
+        ];
+        args.extend(extra);
+        Opt::from_iter(args)
+    }
+
+    #[test]
+    fn make_cli_scenario_creates_soruces_with_expansion() -> Result<(), errors::MqttVerifyError> {
+        let opt = basic_options(vec!["--topic", "{{publisher}}"]);
+        let scenario = super::make_cli_scenario(&opt)?;
+        assert_eq!(1, scenario.publishers.len());
+        let publisher = scenario.publishers.get(0).unwrap();
+        assert_eq!(1, publisher.sources.len());
+        let source = publisher.sources.get(0).unwrap();
+        assert_eq!("p-1".to_owned(), source.topic.value());
+        Ok(())
+    }
+
+    #[test]
+    fn make_cli_scenario_expands_from_parameter() -> Result<(), errors::MqttVerifyError> {
+        let opt = basic_options(vec!["--topic", "{{foo}}", "--parameter", "foo=bar"]);
+        let scenario = super::make_cli_scenario(&opt)?;
+        let publisher = scenario.publishers.get(0).unwrap();
+        let source = publisher.sources.get(0).unwrap();
+        assert_eq!("bar".to_owned(), source.topic.value());
+        Ok(())
+    }
 }
