@@ -12,11 +12,12 @@ path = "src/lib.rs"
 name = "mqtt-verify"
 
 [dependencies]
+async-std = "~1.6"
 evalexpr = "~5.0"
-futures = "~0.1"
-futures-timer = "~0.1"
+futures = "~0.3"
+futures-ticker = "0.0.1"
 log = "*"
-paho-mqtt = "~0.7"
+paho-mqtt = { git = "https://github.com/eclipse/paho.mqtt.rust" }
 snafu = "*"
 stderrlog = "*"
 structopt = { version = "0.3", default-features = false }

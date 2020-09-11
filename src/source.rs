@@ -1,7 +1,6 @@
 use crate::context::ContextualValue;
-use crate::errors;
-use futures::{future, stream::Stream};
-use futures_timer::Interval;
+use futures::{future, stream::StreamExt};
+use futures_ticker::Ticker;
 use paho_mqtt as mqtt;
 use std::cell::Cell;
 use std::time::Duration;
@@ -42,13 +41,12 @@ impl VerifiableSource {
 
 impl Source for VerifiableSource {
     fn messages(self) -> crate::MessageStream {
-        Box::new(
-            Interval::new(Duration::from_micros(
+        Box::pin(
+            Ticker::new(Duration::from_micros(
                 (1_000_000f32 / self.frequency) as u64,
             ))
-            .map_err(|err| errors::MqttVerifyError::SourceTimerError { source: err })
             .map(move |_| self.next_message())
-            .take_while(|message| future::ok(message.is_some()))
+            .take_while(|message| future::ready(message.is_some()))
             .map(|message| message.unwrap()),
         )
     }
