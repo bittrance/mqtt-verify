@@ -1,6 +1,7 @@
 use crate::source::Source;
 use futures::{future, future::FutureExt, stream, stream::StreamExt};
 use paho_mqtt as mqtt;
+use std::iter::FromIterator;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -86,19 +87,20 @@ pub async fn run_subscriber(
         .map_err(|err| errors::MqttVerifyError::MqttDisconnectError { source: err })
 }
 
-pub async fn run_scenario(mut scenario: scenario::Scenario) -> () {
-    let publishers = future::join_all(
-        scenario
-            .publishers
-            .drain(..)
-            .map(|publisher| run_publisher(publisher)),
-    );
-    let subscribers = future::join_all(
-        scenario
-            .subscribers
-            .drain(..)
-            .map(|subscriber| run_subscriber(subscriber)),
-    );
-    // TODO: Probably a FuturesUnordered?
-    future::join(publishers, subscribers).map(|_| ()).await
+pub fn run_scenario(
+    mut scenario: scenario::Scenario,
+) -> Pin<Box<dyn stream::Stream<Item = Result<(), errors::MqttVerifyError>>>> {
+    type FutureResult = Pin<Box<dyn future::Future<Output = Result<(), errors::MqttVerifyError>>>>;
+    let results = scenario
+        .publishers
+        .drain(..)
+        .map(|publisher| Box::pin(Box::pin(run_publisher(publisher))) as FutureResult)
+        .chain(
+            scenario
+                .subscribers
+                .drain(..)
+                .map(|subscriber| Box::pin(run_subscriber(subscriber)) as FutureResult),
+        );
+
+    Box::pin(stream::FuturesUnordered::from_iter(results).fuse())
 }

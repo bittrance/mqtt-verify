@@ -1,5 +1,6 @@
 use async_std::task;
 use evalexpr::Value;
+use futures::stream::StreamExt;
 use mqtt_verify::{analyzers, context, errors, scenario, source};
 use std::rc::Rc;
 use structopt::StructOpt;
@@ -85,8 +86,16 @@ fn main() -> Result<(), errors::MqttVerifyError> {
     let opt = Opt::from_args();
     let scenario = make_cli_scenario(&opt)?;
 
-    task::block_on(mqtt_verify::run_scenario(scenario));
-    Ok(())
+    task::block_on(async {
+        let mut results = mqtt_verify::run_scenario(scenario);
+        while let Some(result) = results.next().await {
+            match result {
+                Ok(_) => (),
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
