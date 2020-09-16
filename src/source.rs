@@ -47,7 +47,7 @@ impl Source for VerifiableSource {
             ))
             .map(move |_| self.next_message())
             .take_while(|message| future::ready(message.is_some()))
-            .map(|message| message.unwrap()),
+            .map(|message| Ok(message.unwrap())),
         )
     }
 }

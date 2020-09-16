@@ -1,5 +1,5 @@
 use crate::source::Source;
-use futures::{future, future::FutureExt, stream, stream::StreamExt};
+use futures::{future, stream, stream::StreamExt, stream::TryStreamExt};
 use paho_mqtt as mqtt;
 use std::iter::FromIterator;
 use std::pin::Pin;
@@ -19,7 +19,8 @@ pub fn client(uri: &str) -> mqtt::AsyncClient {
     mqtt::AsyncClient::new(mqtt_opts).unwrap()
 }
 
-pub type MessageStream = Pin<Box<dyn stream::Stream<Item = mqtt::Message>>>;
+pub type MessageStream =
+    Pin<Box<dyn stream::Stream<Item = Result<mqtt::Message, errors::MqttVerifyError>>>>;
 
 fn publisher_messages(publisher: scenario::Publisher) -> MessageStream {
     Box::pin(stream::select_all(
@@ -34,19 +35,23 @@ pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors:
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .finalize();
-    let client1 = publisher.client.clone();
-    let client2 = publisher.client.clone();
-    client1
+    let client = publisher.client.clone();
+    client
         .connect(conn_opts)
         .await
         .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })?;
     publisher_messages(publisher)
-        .for_each_concurrent(None, move |message| {
-            // TODO: Yikes! Don't eat the error!
-            client2.publish(message).map(|_| ())
+        .try_for_each_concurrent(None, |message| {
+            let client2 = client.clone();
+            async move {
+                client2
+                    .publish(message)
+                    .await
+                    .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
+            }
         })
-        .await;
-    client1
+        .await?;
+    client
         .disconnect_after(Duration::from_secs(3))
         .await
         .map(|_| ()) // TODO: What is this ServerResponse thing anyway?
@@ -57,30 +62,29 @@ pub async fn run_subscriber(
     mut subscriber: scenario::Subscriber,
 ) -> Result<(), errors::MqttVerifyError> {
     let mut analyzer = subscriber.sinks.remove(0);
-    let mut client1 = subscriber.client.clone();
+    let mut client = subscriber.client.clone();
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .finalize();
-    client1
+    client
         .connect(conn_opts)
         .await
         .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })?;
-    client1
+    client
         .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
         .await
         .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })?;
-    client1
+    let mut messages = client
         .get_stream(100)
         .take_while(|message| future::ready(message.is_some()))
-        .map(move |message| analyzer.analyze(message.unwrap()))
-        .take_while(|analysis| match analysis {
-            Ok(analyzers::State::Continue) => future::ready(true),
-            Ok(analyzers::State::Done) => future::ready(false),
-            Err(err) => future::ready(false),
-        })
-        .fold(None::<u8>, |_, _| future::ready(None))
-        .await;
-    client1
+        .map(|message| message.unwrap());
+    while let Some(message) = messages.next().await {
+        match analyzer.analyze(message)? {
+            analyzers::State::Continue => break,
+            analyzers::State::Done => (),
+        };
+    }
+    client
         .disconnect_after(Duration::from_secs(3))
         .await
         .map(|_| ()) // TODO: What is this ServerResponse thing anyway?
