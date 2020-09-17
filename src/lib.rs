@@ -80,8 +80,8 @@ pub async fn run_subscriber(
         .map(|message| message.unwrap());
     while let Some(message) = messages.next().await {
         match analyzer.analyze(message)? {
-            analyzers::State::Continue => break,
-            analyzers::State::Done => (),
+            analyzers::State::Continue => (),
+            analyzers::State::Done => break,
         };
     }
     client
