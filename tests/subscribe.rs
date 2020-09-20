@@ -3,7 +3,10 @@ use bollard::container::{
     StartContainerOptions,
 };
 use bollard::Docker;
-use futures::{future::join, FutureExt};
+use futures::{
+    future::{join, select, Either},
+    FutureExt,
+};
 use futures_timer::Delay;
 use mqtt_verify::analyzers;
 use mqtt_verify::errors;
@@ -14,7 +17,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::default::Default;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MOSQUITTO_NAME: &str = "mqtt-verify-mosquitto";
 
@@ -115,6 +118,7 @@ fn make_subscriber(
     };
     let subscriber = scenario::Subscriber {
         client: client(port),
+        initial_timeout: Duration::from_millis(1000),
         topics: vec![topic_name],
         sinks: vec![Box::new(sink)],
     };
@@ -133,4 +137,21 @@ async fn terminate_when_analyzer_done() {
     s_err.unwrap();
     p_err.unwrap();
     assert_eq!(1, received.borrow().len());
+}
+
+#[tokio::test]
+async fn connection_timeout() {
+    let (mut subscriber, _) = make_subscriber(9, "ignored".to_owned());
+    subscriber.initial_timeout = Duration::from_millis(100);
+    let start_time = Instant::now();
+    match select(
+        Box::pin(mqtt_verify::run_subscriber(subscriber)),
+        Box::pin(Delay::new(Duration::from_millis(1000))),
+    )
+    .await
+    {
+        Either::Left(_) if Instant::now() - start_time >= Duration::from_millis(100) => (),
+        Either::Left(_) => panic!("Subscriber gave up too quickly"),
+        Either::Right(_) => panic!("Timout waiting for timeout"),
+    }
 }

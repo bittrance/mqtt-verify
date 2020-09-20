@@ -3,6 +3,8 @@ use evalexpr::Value;
 use futures::stream::StreamExt;
 use mqtt_verify::{analyzers, context, errors, scenario, source};
 use std::rc::Rc;
+use std::str::FromStr;
+use std::time::Duration;
 use structopt::StructOpt;
 
 fn split_on_equal(input: &str) -> Result<(String, String), errors::MqttVerifyError> {
@@ -14,6 +16,13 @@ fn split_on_equal(input: &str) -> Result<(String, String), errors::MqttVerifyErr
             input: input.to_owned(),
         })
     }
+}
+
+fn duration_from_str(input: &str) -> Result<Duration, errors::MqttVerifyError> {
+    let secs = f32::from_str(input).map_err(|_| errors::MqttVerifyError::MalformedValue {
+        value: input.to_owned(),
+    })?;
+    Ok(Duration::from_secs_f32(secs))
 }
 
 #[derive(StructOpt, Debug)]
@@ -37,6 +46,9 @@ pub struct Opt {
     /// URI to verify messages from
     #[structopt(long = "subscribe-uri", env = "PUBLISH_URI")]
     subscribe_uri: String,
+    /// Timeout waiting to connect to broker, both when publishing and subscribing
+    #[structopt(long = "initial-timeout", env = "INITIAL_TIMEOUT", default_value = "1.0", parse(try_from_str = duration_from_str))]
+    initial_timeout: Duration,
     /// Parameter for expansion
     #[structopt(long = "parameter", parse(try_from_str = split_on_equal))]
     parameters: Vec<(String, String)>,
@@ -72,10 +84,12 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<scenario::Scenario, errors::MqttVe
     Ok(scenario::Scenario {
         publishers: vec![scenario::Publisher {
             client: mqtt_verify::client(&opt.publish_uri),
+            initial_timeout: opt.initial_timeout,
             sources: sources,
         }],
         subscribers: vec![scenario::Subscriber {
             client: mqtt_verify::client(&opt.subscribe_uri),
+            initial_timeout: opt.initial_timeout,
             topics: vec![opt.topic.clone()],
             sinks: sinks,
         }],

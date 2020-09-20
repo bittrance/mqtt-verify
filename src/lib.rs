@@ -1,9 +1,10 @@
 use crate::source::Source;
 use futures::{future, stream, stream::StreamExt, stream::TryStreamExt};
 use paho_mqtt as mqtt;
+use std::cmp;
 use std::iter::FromIterator;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub mod analyzers;
 pub mod context;
@@ -31,15 +32,30 @@ fn publisher_messages(publisher: scenario::Publisher) -> MessageStream {
     ))
 }
 
-pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors::MqttVerifyError> {
+async fn connect(
+    client: &mqtt::AsyncClient,
+    timeout: &Duration,
+) -> Result<(), errors::MqttVerifyError> {
+    let ref max_interval = Duration::from_secs(1);
+    let interval = cmp::min(timeout, max_interval);
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
+        .connect_timeout(*interval)
         .finalize();
+
+    let deadline = Instant::now() + *timeout;
+    loop {
+        match client.connect(conn_opts.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(_) if Instant::now() < deadline => continue,
+            Err(err) => return Err(errors::MqttVerifyError::MqttConnectError { source: err }),
+        }
+    }
+}
+
+pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors::MqttVerifyError> {
     let client = publisher.client.clone();
-    client
-        .connect(conn_opts)
-        .await
-        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })?;
+    connect(&client, &publisher.initial_timeout).await?;
     publisher_messages(publisher)
         .try_for_each_concurrent(None, |message| {
             let client2 = client.clone();
@@ -63,13 +79,7 @@ pub async fn run_subscriber(
 ) -> Result<(), errors::MqttVerifyError> {
     let mut analyzer = subscriber.sinks.remove(0);
     let mut client = subscriber.client.clone();
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .clean_session(true)
-        .finalize();
-    client
-        .connect(conn_opts)
-        .await
-        .map_err(|err| errors::MqttVerifyError::MqttConnectError { source: err })?;
+    connect(&client, &subscriber.initial_timeout).await?;
     client
         .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
         .await
