@@ -1,5 +1,8 @@
 use crate::source::Source;
-use futures::{future, stream, stream::StreamExt, stream::TryStreamExt};
+use async_std::task;
+use futures::{
+    channel::mpsc, future, future::TryFutureExt, stream, stream::StreamExt, stream::TryStreamExt,
+};
 use paho_mqtt as mqtt;
 use std::cmp;
 use std::iter::FromIterator;
@@ -11,6 +14,20 @@ pub mod context;
 pub mod errors;
 pub mod scenario;
 pub mod source;
+
+trait EventStream {
+    fn eventstream(&mut self) -> Pin<Box<dyn stream::Stream<Item = mqtt::AsyncClient> + Send>>;
+}
+
+impl EventStream for mqtt::AsyncClient {
+    fn eventstream(&mut self) -> Pin<Box<dyn stream::Stream<Item = mqtt::AsyncClient> + Send>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.set_connected_callback(move |client| {
+            tx.unbounded_send(client.clone()).unwrap();
+        });
+        Box::pin(rx)
+    }
+}
 
 pub fn client(uri: &str) -> mqtt::AsyncClient {
     let mqtt_opts = mqtt::CreateOptionsBuilder::new()
@@ -41,6 +58,7 @@ async fn connect(
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .connect_timeout(*interval)
+        .automatic_reconnect(*interval, *interval)
         .finalize();
 
     let deadline = Instant::now() + *timeout;
@@ -79,20 +97,22 @@ pub async fn run_subscriber(
 ) -> Result<(), errors::MqttVerifyError> {
     let mut analyzer = subscriber.sinks.remove(0);
     let mut client = subscriber.client.clone();
+    let topics = subscriber.topics.clone();
+    task::spawn(client.eventstream().map(Ok).try_for_each(move |client| {
+        client
+            .subscribe_many(&topics, &vec![0; topics.len()])
+            .map_ok(|_| ())
+            .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
+    }));
     connect(&client, &subscriber.initial_timeout).await?;
-    client
-        .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
-        .await
-        .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })?;
-    let mut messages = client
-        .get_stream(100)
-        .take_while(|message| future::ready(message.is_some()))
-        .map(|message| message.unwrap());
+    let mut messages = client.get_stream(100);
     while let Some(message) = messages.next().await {
-        match analyzer.analyze(message)? {
-            analyzers::State::Continue => (),
-            analyzers::State::Done => break,
-        };
+        if let Some(message) = message {
+            match analyzer.analyze(message)? {
+                analyzers::State::Continue => (),
+                analyzers::State::Done => break,
+            }
+        }
     }
     client
         .disconnect_after(Duration::from_secs(3))

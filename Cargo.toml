@@ -18,7 +18,7 @@ futures = "~0.3"
 futures-ticker = "0.0.1"
 futures-timer = "~3.0"
 log = "*"
-paho-mqtt = { git = "https://github.com/eclipse/paho.mqtt.rust" }
+paho-mqtt = "~0.9"
 snafu = "*"
 stderrlog = "*"
 structopt = { version = "0.3", default-features = false }
