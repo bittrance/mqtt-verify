@@ -1,8 +1,9 @@
 use bollard::container::{
-    APIContainers, Config, CreateContainerOptions, HostConfig, ListContainersOptions,
-    StartContainerOptions, StopContainerOptions,
+    Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions,
+    StopContainerOptions,
 };
-use bollard::{container::PortBinding, Docker};
+use bollard::models::{ContainerSummaryInner, HostConfig, PortBinding};
+use bollard::Docker;
 use futures::{
     future::{join, select, Either, Future},
     FutureExt,
@@ -30,11 +31,15 @@ fn random_port() -> u16 {
 }
 
 fn random_topic(prefix: &str) -> String {
-    let rand_string: String = thread_rng().sample_iter(&Alphanumeric).take(30).collect();
+    let rand_string: String = thread_rng()
+        .sample_iter(Alphanumeric)
+        .map(char::from)
+        .take(30)
+        .collect();
     format!("{}/{}", prefix, rand_string)
 }
 
-async fn find_mosquitto(docker: &Docker) -> Option<APIContainers> {
+async fn find_mosquitto(docker: &Docker) -> Option<ContainerSummaryInner> {
     let mut filters = HashMap::new();
     filters.insert("name", vec![MOSQUITTO_NAME]);
     let options = Some(ListContainersOptions {
@@ -58,15 +63,18 @@ async fn ensure_mosquitto() -> u16 {
             create_mosquitto().await;
             mosquitto = find_mosquitto(&docker).await;
         }
-        Some(ref m) if m.state == "exited" => {
+        Some(ref m) if m.state == Some("exited".to_owned()) => {
             restart_mosquitto().await;
         }
-        Some(ref m) if m.state != "running" => panic!("Can't handle state {}", m.state),
+        Some(ref m) if m.state != Some("running".to_owned()) => {
+            panic!("Can't handle state {:?}", m.state)
+        }
         Some(_) => (),
     }
     mosquitto
         .unwrap()
         .ports
+        .unwrap()
         .iter()
         .find(|p| p.private_port == 1883)
         .unwrap()
@@ -82,11 +90,11 @@ async fn create_mosquitto() -> () {
     let mut port_bindings = HashMap::new();
     let port = random_port().to_string();
     port_bindings.insert(
-        "1883/tcp",
-        vec![PortBinding {
-            host_ip: "127.0.0.1",
-            host_port: &port,
-        }],
+        "1883/tcp".to_owned(),
+        Some(vec![PortBinding {
+            host_ip: Some("127.0.0.1".to_owned()),
+            host_port: Some(port),
+        }]),
     );
     let config = Config {
         image: Some("eclipse-mosquitto:1.6.15"),
@@ -113,7 +121,7 @@ async fn stop_mosquitto() -> () {
     let docker = Docker::connect_with_local_defaults().unwrap();
     if let Some(mosquitto) = find_mosquitto(&docker).await {
         docker
-            .stop_container(&mosquitto.id, None::<StopContainerOptions>)
+            .stop_container(&mosquitto.id.unwrap(), None::<StopContainerOptions>)
             .await
             .unwrap();
     }
@@ -123,7 +131,10 @@ async fn restart_mosquitto() -> () {
     let docker = Docker::connect_with_local_defaults().unwrap();
     if let Some(mosquitto) = find_mosquitto(&docker).await {
         docker
-            .start_container(&mosquitto.id, None::<StartContainerOptions<String>>)
+            .start_container(
+                &mosquitto.id.unwrap(),
+                None::<StartContainerOptions<String>>,
+            )
             .await
             .unwrap();
     }

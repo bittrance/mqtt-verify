@@ -1,5 +1,5 @@
 use crate::errors::MqttVerifyError;
-use evalexpr::{build_operator_tree, Context, Function, Node, Value};
+use evalexpr::{build_operator_tree, Context, EvalexprResult, Node, Value};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -90,7 +90,7 @@ impl Context for OverlayContext {
         }
     }
 
-    fn get_function(&self, _: &str) -> Option<&Function> {
+    fn call_function(&self, _id: &str, _argument: &Value) -> EvalexprResult<Value> {
         todo!()
     }
 }
