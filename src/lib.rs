@@ -5,7 +5,6 @@ use futures::{
 };
 use paho_mqtt as mqtt;
 use std::cmp;
-use std::iter::FromIterator;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -53,8 +52,8 @@ async fn connect(
     client: &mqtt::AsyncClient,
     timeout: &Duration,
 ) -> Result<(), errors::MqttVerifyError> {
-    let ref max_interval = Duration::from_secs(1);
-    let interval = cmp::min(timeout, max_interval);
+    let max_interval = Duration::from_secs(1);
+    let interval = cmp::min(timeout, &max_interval);
     let conn_opts = mqtt::ConnectOptionsBuilder::new()
         .clean_session(true)
         .connect_timeout(*interval)
@@ -136,5 +135,5 @@ pub fn run_scenario(
                 .map(|subscriber| Box::pin(run_subscriber(subscriber)) as FutureResult),
         );
 
-    Box::pin(stream::FuturesUnordered::from_iter(results).fuse())
+    Box::pin(results.collect::<stream::FuturesUnordered<_>>().fuse())
 }

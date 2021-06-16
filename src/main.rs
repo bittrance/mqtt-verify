@@ -85,13 +85,13 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<scenario::Scenario, errors::MqttVe
         publishers: vec![scenario::Publisher {
             client: mqtt_verify::client(&opt.publish_uri),
             initial_timeout: opt.initial_timeout,
-            sources: sources,
+            sources,
         }],
         subscribers: vec![scenario::Subscriber {
             client: mqtt_verify::client(&opt.subscribe_uri),
             initial_timeout: opt.initial_timeout,
             topics: vec![opt.topic.clone()],
-            sinks: sinks,
+            sinks,
         }],
     })
 }

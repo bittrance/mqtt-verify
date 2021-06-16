@@ -37,7 +37,7 @@ pub struct ContextualValue {
 
 impl ContextualValue {
     pub fn new(value: Node, context: Rc<OverlayContext>) -> Self {
-        Self { value, context }
+        Self { context, value }
     }
 
     pub fn value(&self) -> String {
