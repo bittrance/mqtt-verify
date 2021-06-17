@@ -4,7 +4,6 @@ use futures::{
     channel::mpsc, future, future::TryFutureExt, stream, stream::StreamExt, stream::TryStreamExt,
 };
 use paho_mqtt as mqtt;
-use std::cmp;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -50,17 +49,10 @@ fn publisher_messages(publisher: scenario::Publisher) -> MessageStream {
 
 async fn connect(
     client: &mqtt::AsyncClient,
-    timeout: &Duration,
+    options: &dyn scenario::AsConnectOptions,
 ) -> Result<(), errors::MqttVerifyError> {
-    let max_interval = Duration::from_secs(1);
-    let interval = cmp::min(timeout, &max_interval);
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .clean_session(true)
-        .connect_timeout(*interval)
-        .automatic_reconnect(*interval, *interval)
-        .finalize();
-
-    let deadline = Instant::now() + *timeout;
+    let conn_opts = options.as_connect_options();
+    let deadline = Instant::now() + options.initial_timeout();
     loop {
         match client.connect(conn_opts.clone()).await {
             Ok(_) => return Ok(()),
@@ -72,7 +64,7 @@ async fn connect(
 
 pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors::MqttVerifyError> {
     let client = publisher.client.clone();
-    connect(&client, &publisher.initial_timeout).await?;
+    connect(&client, &publisher).await?;
     publisher_messages(publisher)
         .try_for_each_concurrent(None, |message| {
             let client2 = client.clone();
@@ -103,7 +95,7 @@ pub async fn run_subscriber(
             .map_ok(|_| ())
             .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
     }));
-    connect(&client, &subscriber.initial_timeout).await?;
+    connect(&client, &subscriber).await?;
     let mut messages = client.get_stream(100);
     while let Some(message) = messages.next().await {
         if let Some(message) = message {

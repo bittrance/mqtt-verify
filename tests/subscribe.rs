@@ -191,7 +191,10 @@ fn make_subscriber(
     };
     let subscriber = scenario::Subscriber {
         client: client(port),
-        initial_timeout: Duration::from_secs(1),
+        connect_options: scenario::ConnectOptions {
+            connect_timeout: Duration::from_secs(1),
+            reconnect_interval: Some(Duration::from_secs(1)),
+        },
         topics: vec![topic_name],
         sinks: vec![Box::new(sink)],
     };

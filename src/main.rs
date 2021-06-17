@@ -49,6 +49,9 @@ pub struct Opt {
     /// Timeout waiting to connect to broker, both when publishing and subscribing
     #[structopt(long = "initial-timeout", env = "INITIAL_TIMEOUT", default_value = "1.0", parse(try_from_str = duration_from_str))]
     initial_timeout: Duration,
+    /// Delay before trying to reconnect when broker connection lost
+    #[structopt(long = "reconnect-interval", env = "RECONNECT_INTERVAL", parse(try_from_str = duration_from_str))]
+    reconnect_interval: Option<Duration>,
     /// Parameter for expansion
     #[structopt(long = "parameter", parse(try_from_str = split_on_equal))]
     parameters: Vec<(String, String)>,
@@ -84,12 +87,18 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<scenario::Scenario, errors::MqttVe
     Ok(scenario::Scenario {
         publishers: vec![scenario::Publisher {
             client: mqtt_verify::client(&opt.publish_uri),
-            initial_timeout: opt.initial_timeout,
+            connect_options: scenario::ConnectOptions {
+                connect_timeout: opt.initial_timeout,
+                reconnect_interval: opt.reconnect_interval,
+            },
             sources,
         }],
         subscribers: vec![scenario::Subscriber {
             client: mqtt_verify::client(&opt.subscribe_uri),
-            initial_timeout: opt.initial_timeout,
+            connect_options: scenario::ConnectOptions {
+                connect_timeout: opt.initial_timeout,
+                reconnect_interval: opt.reconnect_interval,
+            },
             topics: vec![opt.topic.clone()],
             sinks,
         }],
