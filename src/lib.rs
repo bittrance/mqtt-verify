@@ -1,8 +1,9 @@
 use crate::source::Source;
-use futures::{future, stream, stream::StreamExt, stream::TryStreamExt};
+use async_std::task;
+use futures::{
+    channel::mpsc, future, future::TryFutureExt, stream, stream::StreamExt, stream::TryStreamExt,
+};
 use paho_mqtt as mqtt;
-use std::cmp;
-use std::iter::FromIterator;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,20 @@ pub mod context;
 pub mod errors;
 pub mod scenario;
 pub mod source;
+
+trait EventStream {
+    fn eventstream(&mut self) -> Pin<Box<dyn stream::Stream<Item = mqtt::AsyncClient> + Send>>;
+}
+
+impl EventStream for mqtt::AsyncClient {
+    fn eventstream(&mut self) -> Pin<Box<dyn stream::Stream<Item = mqtt::AsyncClient> + Send>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.set_connected_callback(move |client| {
+            tx.unbounded_send(client.clone()).unwrap();
+        });
+        Box::pin(rx)
+    }
+}
 
 pub fn client(uri: &str) -> mqtt::AsyncClient {
     let mqtt_opts = mqtt::CreateOptionsBuilder::new()
@@ -34,16 +49,10 @@ fn publisher_messages(publisher: scenario::Publisher) -> MessageStream {
 
 async fn connect(
     client: &mqtt::AsyncClient,
-    timeout: &Duration,
+    options: &dyn scenario::AsConnectOptions,
 ) -> Result<(), errors::MqttVerifyError> {
-    let ref max_interval = Duration::from_secs(1);
-    let interval = cmp::min(timeout, max_interval);
-    let conn_opts = mqtt::ConnectOptionsBuilder::new()
-        .clean_session(true)
-        .connect_timeout(*interval)
-        .finalize();
-
-    let deadline = Instant::now() + *timeout;
+    let conn_opts = options.as_connect_options();
+    let deadline = Instant::now() + options.initial_timeout();
     loop {
         match client.connect(conn_opts.clone()).await {
             Ok(_) => return Ok(()),
@@ -55,7 +64,7 @@ async fn connect(
 
 pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors::MqttVerifyError> {
     let client = publisher.client.clone();
-    connect(&client, &publisher.initial_timeout).await?;
+    connect(&client, &publisher).await?;
     publisher_messages(publisher)
         .try_for_each_concurrent(None, |message| {
             let client2 = client.clone();
@@ -79,20 +88,22 @@ pub async fn run_subscriber(
 ) -> Result<(), errors::MqttVerifyError> {
     let mut analyzer = subscriber.sinks.remove(0);
     let mut client = subscriber.client.clone();
-    connect(&client, &subscriber.initial_timeout).await?;
-    client
-        .subscribe_many(&subscriber.topics, &vec![0; subscriber.topics.len()])
-        .await
-        .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })?;
-    let mut messages = client
-        .get_stream(100)
-        .take_while(|message| future::ready(message.is_some()))
-        .map(|message| message.unwrap());
+    let topics = subscriber.topics.clone();
+    task::spawn(client.eventstream().map(Ok).try_for_each(move |client| {
+        client
+            .subscribe_many(&topics, &vec![0; topics.len()])
+            .map_ok(|_| ())
+            .map_err(|err| errors::MqttVerifyError::MqttSubscribeError { source: err })
+    }));
+    connect(&client, &subscriber).await?;
+    let mut messages = client.get_stream(100);
     while let Some(message) = messages.next().await {
-        match analyzer.analyze(message)? {
-            analyzers::State::Continue => (),
-            analyzers::State::Done => break,
-        };
+        if let Some(message) = message {
+            match analyzer.analyze(message)? {
+                analyzers::State::Continue => (),
+                analyzers::State::Done => break,
+            }
+        }
     }
     client
         .disconnect_after(Duration::from_secs(3))
@@ -116,5 +127,5 @@ pub fn run_scenario(
                 .map(|subscriber| Box::pin(run_subscriber(subscriber)) as FutureResult),
         );
 
-    Box::pin(stream::FuturesUnordered::from_iter(results).fuse())
+    Box::pin(results.collect::<stream::FuturesUnordered<_>>().fuse())
 }
