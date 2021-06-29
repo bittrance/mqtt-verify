@@ -2,11 +2,13 @@ use crate::context::ContextualValue;
 use futures::{future, stream::StreamExt};
 use futures_ticker::Ticker;
 use paho_mqtt as mqtt;
+use std::any::Any;
 use std::cell::Cell;
 use std::time::Duration;
 
-pub trait Source {
-    fn messages(self) -> crate::MessageStream;
+pub trait Source: Any + 'static {
+    fn messages(self: Box<Self>) -> crate::MessageStream;
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub struct VerifiableSource {
@@ -40,7 +42,7 @@ impl VerifiableSource {
 }
 
 impl Source for VerifiableSource {
-    fn messages(self) -> crate::MessageStream {
+    fn messages(self: Box<Self>) -> crate::MessageStream {
         Box::pin(
             Ticker::new(Duration::from_micros(
                 (1_000_000f32 / self.frequency) as u64,
@@ -49,6 +51,10 @@ impl Source for VerifiableSource {
             .take_while(|message| future::ready(message.is_some()))
             .map(|message| Ok(message.unwrap())),
         )
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

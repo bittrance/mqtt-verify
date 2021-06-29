@@ -64,19 +64,19 @@ pub fn make_cli_scenario(opt: &Opt) -> Result<scenario::Scenario, errors::MqttVe
             .unwrap()
             .insert(k.clone(), Value::String(v.clone()));
     }
-    let mut sources = Vec::new();
+    let mut sources: Vec<Box<dyn source::Source>> = Vec::new();
     let mut sinks: Vec<Box<dyn analyzers::Analyzer>> = Vec::new();
     for i in 1..=opt.publishers {
         let mut context = context::OverlayContext::subcontext(root.clone());
         Rc::get_mut(&mut context)
             .unwrap()
             .insert("publisher".to_owned(), Value::String(format!("p-{}", i)));
-        sources.push(source::VerifiableSource::new(
+        sources.push(Box::new(source::VerifiableSource::new(
             format!("{}", i),
             context::OverlayContext::value_for(context.clone(), &opt.topic)?,
             (opt.frequency * opt.length) as usize,
             opt.frequency,
-        ));
+        )));
         sinks.push(Box::new(analyzers::SessionIdFilter::new(
             format!("{}", i),
             Box::new(analyzers::CountingAnalyzer::new(
@@ -124,7 +124,8 @@ fn main() -> Result<(), errors::MqttVerifyError> {
 #[cfg(test)]
 mod tests {
     use super::Opt;
-    use mqtt_verify::errors;
+    use mqtt_verify::{errors, source};
+    use std::any::Any;
     use structopt::StructOpt;
 
     fn basic_options(extra: Vec<&str>) -> Opt {
@@ -146,8 +147,15 @@ mod tests {
         assert_eq!(1, scenario.publishers.len());
         let publisher = scenario.publishers.get(0).unwrap();
         assert_eq!(1, publisher.sources.len());
-        let source = publisher.sources.get(0).unwrap();
-        assert_eq!("p-1".to_owned(), source.topic.value());
+        let source: &dyn Any = publisher.sources.get(0).unwrap().as_any();
+        assert_eq!(
+            "p-1".to_owned(),
+            source
+                .downcast_ref::<source::VerifiableSource>()
+                .unwrap()
+                .topic
+                .value()
+        );
         Ok(())
     }
 
@@ -156,8 +164,15 @@ mod tests {
         let opt = basic_options(vec!["--topic", "{{foo}}", "--parameter", "foo=bar"]);
         let scenario = super::make_cli_scenario(&opt)?;
         let publisher = scenario.publishers.get(0).unwrap();
-        let source = publisher.sources.get(0).unwrap();
-        assert_eq!("bar".to_owned(), source.topic.value());
+        let source: &dyn Any = publisher.sources.get(0).unwrap().as_any();
+        assert_eq!(
+            "bar".to_owned(),
+            source
+                .downcast_ref::<source::VerifiableSource>()
+                .unwrap()
+                .topic
+                .value()
+        );
         Ok(())
     }
 }

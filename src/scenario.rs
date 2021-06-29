@@ -16,7 +16,7 @@ pub struct Scenario {
 pub struct Publisher {
     pub client: mqtt::AsyncClient,
     pub connect_options: ConnectOptions,
-    pub sources: Vec<source::VerifiableSource>,
+    pub sources: Vec<Box<dyn source::Source>>,
 }
 
 pub struct Subscriber {
