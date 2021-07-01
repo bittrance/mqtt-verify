@@ -1,4 +1,3 @@
-use crate::source::Source;
 use async_std::task;
 use futures::{
     channel::mpsc, future, future::TryFutureExt, stream, stream::StreamExt, stream::TryStreamExt,
@@ -43,7 +42,7 @@ fn publisher_messages(publisher: scenario::Publisher) -> MessageStream {
         publisher
             .sources
             .into_iter()
-            .map(|generator| generator.messages()),
+            .map(|source| source.messages()),
     ))
 }
 
@@ -64,15 +63,18 @@ async fn connect(
 
 pub async fn run_publisher(publisher: scenario::Publisher) -> Result<(), errors::MqttVerifyError> {
     let client = publisher.client.clone();
+    let should_reconnect = publisher.connect_options.reconnect_interval.is_some();
     connect(&client, &publisher).await?;
     publisher_messages(publisher)
         .try_for_each_concurrent(None, |message| {
             let client2 = client.clone();
             async move {
-                client2
-                    .publish(message)
-                    .await
-                    .map_err(|err| errors::MqttVerifyError::MqttPublishError { source: err })
+                let result = client2.publish(message).await;
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(_) if should_reconnect => Ok(()),
+                    Err(err) => Err(errors::MqttVerifyError::MqttPublishError { source: err }),
+                }
             }
         })
         .await?;

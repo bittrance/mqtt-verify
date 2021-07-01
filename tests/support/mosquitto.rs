@@ -4,10 +4,13 @@ use bollard::container::{
 };
 use bollard::models::{ContainerSummaryInner, HostConfig, PortBinding};
 use bollard::Docker;
+use futures::stream::StreamExt;
+use futures_ticker::Ticker;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::collections::HashMap;
 use std::default::Default;
 use std::net::{SocketAddrV4, TcpListener};
+use std::time::Duration;
 
 pub const MOSQUITTO_NAME: &str = "mqtt-verify-mosquitto";
 
@@ -24,6 +27,23 @@ pub fn random_topic(prefix: &str) -> String {
         .take(30)
         .collect();
     format!("{}/{}", prefix, rand_string)
+}
+
+async fn find_port() -> Option<u16> {
+    let docker = Docker::connect_with_local_defaults().unwrap();
+    let mut strobe = Ticker::new(Duration::from_millis(2000)).take(5);
+    while let Some(_) = strobe.next().await {
+        let mosquitto = find_mosquitto(&docker).await.unwrap();
+        if let Some(port) = mosquitto
+            .ports
+            .as_ref()
+            .and_then(|ports| ports.iter().find(|p| p.private_port == 1883))
+        {
+            let port_number = port.public_port.unwrap() as u16;
+            return Some(port_number);
+        }
+    }
+    None
 }
 
 pub async fn find_mosquitto(docker: &Docker) -> Option<ContainerSummaryInner> {
@@ -44,11 +64,10 @@ pub async fn find_mosquitto(docker: &Docker) -> Option<ContainerSummaryInner> {
 
 pub async fn ensure_mosquitto() -> u16 {
     let docker = Docker::connect_with_local_defaults().unwrap();
-    let mut mosquitto = find_mosquitto(&docker).await;
+    let mosquitto = find_mosquitto(&docker).await;
     match mosquitto {
         None => {
             create_mosquitto().await;
-            mosquitto = find_mosquitto(&docker).await;
         }
         Some(ref m) if m.state == Some("exited".to_owned()) => {
             restart_mosquitto().await;
@@ -58,15 +77,7 @@ pub async fn ensure_mosquitto() -> u16 {
         }
         Some(_) => (),
     }
-    mosquitto
-        .unwrap()
-        .ports
-        .unwrap()
-        .iter()
-        .find(|p| p.private_port == 1883)
-        .unwrap()
-        .public_port
-        .unwrap() as u16
+    find_port().await.unwrap() as u16
 }
 
 pub async fn create_mosquitto() -> () {
@@ -106,23 +117,21 @@ pub async fn create_mosquitto() -> () {
 
 pub async fn stop_mosquitto() -> () {
     let docker = Docker::connect_with_local_defaults().unwrap();
-    if let Some(mosquitto) = find_mosquitto(&docker).await {
-        docker
-            .stop_container(&mosquitto.id.unwrap(), None::<StopContainerOptions>)
-            .await
-            .unwrap();
-    }
+    let mosquitto = find_mosquitto(&docker).await.unwrap();
+    docker
+        .stop_container(&mosquitto.id.unwrap(), None::<StopContainerOptions>)
+        .await
+        .unwrap();
 }
 
 pub async fn restart_mosquitto() -> () {
     let docker = Docker::connect_with_local_defaults().unwrap();
-    if let Some(mosquitto) = find_mosquitto(&docker).await {
-        docker
-            .start_container(
-                &mosquitto.id.unwrap(),
-                None::<StartContainerOptions<String>>,
-            )
-            .await
-            .unwrap();
-    }
+    let mosquitto = find_mosquitto(&docker).await.unwrap();
+    docker
+        .start_container(
+            &mosquitto.id.unwrap(),
+            None::<StartContainerOptions<String>>,
+        )
+        .await
+        .unwrap();
 }
